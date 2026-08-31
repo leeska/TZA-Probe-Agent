@@ -1,0 +1,70 @@
+package server
+
+import (
+	"strings"
+	"testing"
+
+	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
+)
+
+func TestParseCarrierRouteTrace(t *testing.T) {
+	trace := parseCarrierRouteTrace("traceroute to 202.97.14.1\n 1  192.0.2.1  0.42 ms\n 2  202.97.14.1  12.5 ms", "202.97.14.1")
+	if !trace.Reached || len(trace.Hops) != 2 {
+		t.Fatalf("trace = %#v, want two reached hops", trace)
+	}
+	if trace.Hops[1].RTTMs != 12.5 {
+		t.Fatalf("last hop RTT = %v, want 12.5", trace.Hops[1].RTTMs)
+	}
+
+	v6 := parseCarrierRouteTrace(" 1  2001:db8::1  1.1 ms\n 2  2001:db8::2  8.4 ms", "2001:db8::2")
+	if !v6.Reached || len(v6.Hops) != 2 {
+		t.Fatalf("IPv6 trace = %#v, want reached", v6)
+	}
+}
+
+func TestClassifyCarrierRouteUsesTcpQualityLabels(t *testing.T) {
+	tests := []struct {
+		name    string
+		carrier string
+		target  string
+		hops    []carrierRouteHop
+		want    string
+	}{
+		{name: "cn2", carrier: "telecom", target: "198.51.100.1", hops: []carrierRouteHop{{IP: "59.43.246.1"}}, want: "CN2GIA"},
+		{name: "unicom", carrier: "unicom", target: "198.51.100.1", hops: []carrierRouteHop{{IP: "219.158.3.1"}}, want: "4837"},
+		{name: "mobile", carrier: "mobile", target: "198.51.100.1", hops: []carrierRouteHop{{IP: "223.120.2.1"}}, want: "CMI"},
+		{name: "combo", carrier: "unicom", hops: []carrierRouteHop{{IP: "103.214.1.1"}, {IP: "219.158.3.1"}}, want: "10099->4837"},
+		{name: "fallback", carrier: "telecom", target: "198.51.100.1", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := strings.Join(classifyCarrierRoutePath(tt.carrier, tt.hops), "->"); got != tt.want {
+				t.Fatalf("label = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCarrierRouteTraceMasksAddresses(t *testing.T) {
+	trace := publicCarrierRouteTrace([]carrierRouteHop{{Hop: 1, IP: "219.158.3.1", RTTMs: 12.5, HasRTT: true}, {Hop: 2}})
+	if len(trace) != 2 || trace[0].Address != "219.158.*.*" || trace[0].ASN != "AS4837" || !trace[1].TimedOut {
+		t.Fatalf("masked trace = %#v", trace)
+	}
+}
+
+func TestCarrierRouteErrorsMaskAddresses(t *testing.T) {
+	message := sanitizeCarrierRouteError("trace to 219.158.3.1 via 2408:8000:2:123::1 failed")
+	if strings.Contains(message, "219.158.3.1") || strings.Contains(message, "2408:8000:2:123::1") {
+		t.Fatalf("error still contains raw address: %q", message)
+	}
+	if !strings.Contains(message, "219.158.*.*") || !strings.Contains(message, "2408:8000:****") {
+		t.Fatalf("error did not preserve masked context: %q", message)
+	}
+}
+
+func TestCarrierRouteEntryJSONContract(t *testing.T) {
+	entry := v2.CarrierRouteEntry{Family: "ipv6", Carrier: "mobile", Target: "2001:db8::1", Status: "unsupported"}
+	if entry.Family != "ipv6" || entry.Carrier != "mobile" {
+		t.Fatalf("unexpected entry: %#v", entry)
+	}
+}
