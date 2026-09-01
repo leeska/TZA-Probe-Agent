@@ -62,6 +62,7 @@ func TestClassifyCarrierRouteUsesTcpQualityLabels(t *testing.T) {
 		{name: "mobile", carrier: "mobile", target: "198.51.100.1", hops: []carrierRouteHop{{IP: "223.120.2.1"}}, want: "CMI"},
 		{name: "cmin2 asn overrides broad mobile prefix", carrier: "mobile", hops: []carrierRouteHop{{IP: "223.120.2.1", ASN: "AS58807"}}, want: "CMIN2"},
 		{name: "cmin2 to cmi", carrier: "mobile", hops: []carrierRouteHop{{IP: "223.120.2.1", ASN: "58807"}, {IP: "221.183.1.1", ASN: "9808"}}, want: "CMIN2->CMI"},
+		{name: "cmi hop before cmin2 still uses conventional summary", carrier: "mobile", hops: []carrierRouteHop{{IP: "2402:4f00::1", ASN: "58453"}, {IP: "2402:4f00::2", ASN: "58807"}, {IP: "2409:8080::1", ASN: "9808"}}, want: "CMIN2->CMI"},
 		{name: "combo", carrier: "unicom", hops: []carrierRouteHop{{IP: "103.214.1.1"}, {IP: "219.158.3.1"}}, want: "10099->4837"},
 		{name: "fallback", carrier: "telecom", target: "198.51.100.1", want: ""},
 	}

@@ -468,6 +468,22 @@ func classifyCarrierRoutePath(_ string, hops []carrierRouteHop) []string {
 		seen[label] = struct{}{}
 		labels = append(labels, label)
 	}
+	// CMIN2 is the premium international segment and CMI is the regular
+	// mainland handoff. NextTrace can observe them in either hop order around
+	// the boundary, but the user-facing route class is conventionally written
+	// as CMIN2->CMI. Keep the raw hop order untouched in the public trace.
+	cmin2Index, cmiIndex := -1, -1
+	for index, label := range labels {
+		switch label {
+		case "CMIN2":
+			cmin2Index = index
+		case "CMI":
+			cmiIndex = index
+		}
+	}
+	if cmin2Index >= 0 && cmiIndex >= 0 && cmiIndex < cmin2Index {
+		labels[cmiIndex], labels[cmin2Index] = labels[cmin2Index], labels[cmiIndex]
+	}
 	return labels
 }
 
