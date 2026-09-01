@@ -2,14 +2,16 @@ FROM alpine:3.21
 
 WORKDIR /app
 
-# Carrier return-route probes execute the bounded traceroute command from the
-# agent. Keep it in the runtime image so Docker installations do not report
-# every configured route as unsupported.
-RUN apk add --no-cache traceroute
-
 # Docker buildx 会在构建时自动填充这些变量
 ARG TARGETOS
 ARG TARGETARCH
+ARG NEXTTRACE_VERSION=v1.7.3
+
+# NextTrace supplies per-hop ASN evidence for route classification. The
+# traditional traceroute package remains as the compatibility fallback.
+RUN apk add --no-cache ca-certificates curl traceroute \
+    && curl -fL "https://github.com/nxtrace/NTrace-core/releases/download/${NEXTTRACE_VERSION}/nexttrace_linux_${TARGETARCH}" -o /app/nexttrace \
+    && chmod 755 /app/nexttrace
 
 COPY --chmod=755 tza-probe-agent-${TARGETOS}-${TARGETARCH} /app/tza-probe-agent
 

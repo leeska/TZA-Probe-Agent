@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,12 +33,14 @@ var (
 	traceHopPattern         = regexp.MustCompile(`^[0-9]+$`)
 	carrierRouteIPv4Pattern = regexp.MustCompile(`(?:\d{1,3}\.){3}\d{1,3}`)
 	carrierRouteIPv6Pattern = regexp.MustCompile(`(?i)(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}`)
+	carrierRouteANSI        = regexp.MustCompile(`\x1b\[[0-9;]*[[:alpha:]]`)
 	carrierRouteSlots       = make(chan struct{}, carrierRouteMaxConcurrency)
 )
 
 type carrierRouteHop struct {
 	Hop    int
 	IP     string
+	ASN    string
 	RTTMs  float64
 	HasRTT bool
 }
@@ -271,39 +275,84 @@ func resolveCarrierRouteTarget(ctx context.Context, host, family string) (string
 }
 
 func executeCarrierRouteTrace(ctx context.Context, targetIP string, port int, family string, maxHops int) (carrierRouteTrace, error) {
-	command, err := exec.LookPath("traceroute")
-	if err != nil {
-		return carrierRouteTrace{}, err
-	}
 	var lastTrace carrierRouteTrace
 	var lastErr error
-	// TCP is closest to TcpQuality's return-path probe. UDP is a useful
-	// unprivileged fallback on hosts where raw TCP traceroute is unavailable.
-	for _, probe := range []string{"-T", "-U"} {
-		args := []string{"-n", probe, "-p", strconv.Itoa(port), "-q", "1", "-w", "1", "-m", strconv.Itoa(maxHops)}
-		if family == "ipv6" {
-			args = append(args, "-6")
+	// NextTrace provides structured per-hop ASN metadata, which is important
+	// for distinguishing CMIN2 (AS58807) from the regular CMI network. Keep
+	// traceroute as a compatibility fallback for minimal/manual installations.
+	for _, runner := range []struct {
+		name   string
+		lookup func() (string, error)
+		parse  func(string, string) carrierRouteTrace
+	}{
+		{name: "nexttrace", lookup: func() (string, error) { return lookPathCarrierRouteCommand("nexttrace") }, parse: parseNexttraceRawTrace},
+		{name: "traceroute", lookup: func() (string, error) { return lookPathCarrierRouteCommand("traceroute") }, parse: parseCarrierRouteTrace},
+	} {
+		command, err := runner.lookup()
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", runner.name, err)
+			continue
 		}
-		args = append(args, targetIP)
-		cmd := exec.CommandContext(ctx, command, args...)
-		output, runErr := cmd.CombinedOutput()
-		trace := parseCarrierRouteTrace(string(output), targetIP)
-		trace.Output = string(output)
-		if cmd.ProcessState != nil {
-			trace.ExitCode = cmd.ProcessState.ExitCode()
-		}
-		lastTrace, lastErr = trace, runErr
-		if len(trace.Hops) > 0 {
-			return trace, nil
+		// TCP is closest to TcpQuality's return-path probe. UDP is a useful
+		// unprivileged fallback on hosts where raw TCP tracing is unavailable.
+		for _, probe := range []string{"-T", "-U"} {
+			args := routeTraceArgs(runner.name, probe, port, family, maxHops, targetIP)
+			cmd := exec.CommandContext(ctx, command, args...)
+			output, runErr := cmd.CombinedOutput()
+			trace := runner.parse(string(output), targetIP)
+			trace.Output = string(output)
+			if cmd.ProcessState != nil {
+				trace.ExitCode = cmd.ProcessState.ExitCode()
+			}
+			lastTrace, lastErr = trace, runErr
+			if len(trace.Hops) > 0 {
+				return trace, nil
+			}
+			if ctx.Err() != nil {
+				break
+			}
 		}
 		if ctx.Err() != nil {
 			break
 		}
 	}
 	if lastErr != nil {
-		return lastTrace, fmt.Errorf("traceroute: %w", lastErr)
+		return lastTrace, fmt.Errorf("route trace: %w", lastErr)
 	}
-	return lastTrace, errors.New("traceroute returned no hops")
+	return lastTrace, errors.New("route trace returned no hops")
+}
+
+func lookPathCarrierRouteCommand(name string) (string, error) {
+	if command, err := exec.LookPath(name); err == nil {
+		return command, nil
+	}
+	executable, err := os.Executable()
+	if err == nil {
+		for _, filename := range []string{name, name + ".exe"} {
+			candidate := filepath.Join(filepath.Dir(executable), filename)
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				return candidate, nil
+			}
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
+func routeTraceArgs(command, probe string, port int, family string, maxHops int, targetIP string) []string {
+	if command == "nexttrace" {
+		args := []string{"--raw", "-n", "-q", "1", "--parallel-requests", "1", "--max-attempts", "1", "-m", strconv.Itoa(maxHops), "--timeout", "1000", probe, "-p", strconv.Itoa(port)}
+		if family == "ipv4" {
+			args = append(args, "-4")
+		} else {
+			args = append(args, "-6")
+		}
+		return append(args, targetIP)
+	}
+	args := []string{"-n", probe, "-p", strconv.Itoa(port), "-q", "1", "-w", "1", "-m", strconv.Itoa(maxHops)}
+	if family == "ipv6" {
+		args = append(args, "-6")
+	}
+	return append(args, targetIP)
 }
 
 func parseCarrierRouteTrace(output, targetIP string) carrierRouteTrace {
@@ -336,6 +385,40 @@ func parseCarrierRouteTrace(output, targetIP string) carrierRouteTrace {
 	return trace
 }
 
+// parseNexttraceRawTrace consumes NextTrace's stable pipe-delimited raw mode:
+// ttl|address|hostname|rtt_ms|asn|... . It avoids depending on the human-facing
+// table layout while retaining ASN evidence for deterministic route labels.
+func parseNexttraceRawTrace(output, targetIP string) carrierRouteTrace {
+	trace := carrierRouteTrace{}
+	target := net.ParseIP(strings.Trim(targetIP, "[]"))
+	for _, line := range strings.Split(carrierRouteANSI.ReplaceAllString(output, ""), "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "|")
+		if len(fields) < 2 || !traceHopPattern.MatchString(strings.TrimSpace(fields[0])) {
+			continue
+		}
+		hopNumber, _ := strconv.Atoi(strings.TrimSpace(fields[0]))
+		hop := carrierRouteHop{Hop: hopNumber}
+		candidate := strings.Trim(strings.TrimSpace(fields[1]), "[]()")
+		if parsed := net.ParseIP(candidate); parsed != nil {
+			hop.IP = parsed.String()
+		}
+		if len(fields) > 3 {
+			rttText := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(fields[3]), "ms"))
+			if rtt, err := strconv.ParseFloat(rttText, 64); err == nil {
+				hop.RTTMs, hop.HasRTT = rtt, true
+			}
+		}
+		if len(fields) > 4 {
+			hop.ASN = normalizeCarrierRouteASN(fields[4])
+		}
+		trace.Hops = append(trace.Hops, hop)
+		if hop.IP != "" && target != nil && net.ParseIP(hop.IP).Equal(target) {
+			trace.Reached = true
+		}
+	}
+	return trace
+}
+
 type carrierRouteEvidence struct {
 	ASN     string
 	Network string
@@ -350,7 +433,7 @@ func classifyCarrierRoutePath(_ string, hops []carrierRouteHop) []string {
 	firstCN2 := -1
 	hasCTG := false
 	for index, hop := range hops {
-		evidence := carrierRouteEvidenceForIP(hop.IP)
+		evidence := carrierRouteEvidenceForHop(hop)
 		if evidence.Network == "CN2" && firstCN2 < 0 {
 			firstCN2 = index
 		}
@@ -361,7 +444,7 @@ func classifyCarrierRoutePath(_ string, hops []carrierRouteHop) []string {
 	if firstCN2 >= 0 {
 		label := "CN2GIA"
 		for _, hop := range hops[firstCN2+1:] {
-			if carrierRouteEvidenceForIP(hop.IP).Network == "163" {
+			if carrierRouteEvidenceForHop(hop).Network == "163" {
 				label = "CN2GT"
 				break
 			}
@@ -375,7 +458,7 @@ func classifyCarrierRoutePath(_ string, hops []carrierRouteHop) []string {
 		seen["CTG"] = struct{}{}
 	}
 	for _, hop := range hops {
-		label := carrierRouteEvidenceForIP(hop.IP).Network
+		label := carrierRouteEvidenceForHop(hop).Network
 		if label == "" || label == "CN2" || label == "CTG" {
 			continue
 		}
@@ -386,6 +469,42 @@ func classifyCarrierRoutePath(_ string, hops []carrierRouteHop) []string {
 		labels = append(labels, label)
 	}
 	return labels
+}
+
+func carrierRouteEvidenceForHop(hop carrierRouteHop) carrierRouteEvidence {
+	switch normalizeCarrierRouteASN(hop.ASN) {
+	case "58807":
+		return carrierRouteEvidence{ASN: "AS58807", Network: "CMIN2"}
+	case "58453":
+		return carrierRouteEvidence{ASN: "AS58453", Network: "CMI"}
+	case "9808":
+		return carrierRouteEvidence{ASN: "AS9808", Network: "CMI"}
+	case "4809":
+		return carrierRouteEvidence{ASN: "AS4809", Network: "CN2"}
+	case "23764":
+		return carrierRouteEvidence{ASN: "AS23764", Network: "CTG"}
+	case "10099":
+		return carrierRouteEvidence{ASN: "AS10099", Network: "10099"}
+	case "9929":
+		return carrierRouteEvidence{ASN: "AS9929", Network: "9929"}
+	case "4837":
+		return carrierRouteEvidence{ASN: "AS4837", Network: "4837"}
+	case "4134":
+		return carrierRouteEvidence{ASN: "AS4134", Network: "163"}
+	default:
+		return carrierRouteEvidenceForIP(hop.IP)
+	}
+}
+
+func normalizeCarrierRouteASN(value string) string {
+	value = strings.TrimSpace(strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(value)), "AS"))
+	if value == "" {
+		return ""
+	}
+	if _, err := strconv.ParseUint(value, 10, 32); err != nil {
+		return ""
+	}
+	return value
 }
 
 func carrierRouteEvidenceForIP(ip string) carrierRouteEvidence {
@@ -426,7 +545,7 @@ func hasAnyPrefix(value string, prefixes ...string) bool {
 func publicCarrierRouteTrace(hops []carrierRouteHop) []v2.CarrierRouteTraceHop {
 	trace := make([]v2.CarrierRouteTraceHop, 0, len(hops))
 	for _, hop := range hops {
-		evidence := carrierRouteEvidenceForIP(hop.IP)
+		evidence := carrierRouteEvidenceForHop(hop)
 		item := v2.CarrierRouteTraceHop{
 			Hop:      hop.Hop,
 			Address:  maskCarrierRouteIP(hop.IP),

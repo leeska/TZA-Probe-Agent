@@ -61,9 +61,9 @@ export AGENT_TOKEN="your-token"
 | `disable_compression` | `AGENT_DISABLE_COMPRESSION` | `--disable-compression` | 禁用 v2 传输压缩 | `1.2.10` |
 | `prefer_ip_version` | `AGENT_PREFER_IP_VERSION` | `--prefer-ip-version` | 优先使用 IP 版本，可选 `4` 或 `6` | 未发布 |
 
-当连接到 TZA Probe Core 并使用 v2 协议时，Agent 还支持 Core 下发的三网 IPv4/IPv6 回程检测任务。检测使用受限的 TCP traceroute，缺少 raw socket 权限时自动尝试 UDP traceroute；目标、最大跳数、并发数和超时均由 Agent 做上限校验。Agent 不执行 Core 下发的 shell 命令。
+当连接到 TZA Probe Core 并使用 v2 协议时，Agent 还支持 Core 下发的三网 IPv4/IPv6 回程检测任务。检测优先使用受限的 NextTrace TCP Trace，并利用每跳 ASN 区分 CMIN2、CMI 等线路；TCP 不可用时尝试 UDP，NextTrace 缺失或执行失败时再降级到系统 traceroute。目标、最大跳数、并发数和超时均由 Agent 做上限校验，Agent 不执行 Core 下发的 shell 命令。
 
-回程检测需要系统提供 `traceroute` 命令。官方 Linux 安装脚本和 Docker 镜像会自动安装；手动部署 Agent 时需先通过系统包管理器安装 `traceroute`。
+官方安装脚本会将固定版本的 `nexttrace` 安装到 Agent 同目录，Docker 镜像也已内置 NextTrace 与 traceroute。手动部署时建议安装 `nexttrace`，并保留 `traceroute` 作为权限或平台不兼容时的兜底。
 
 完整参数可运行：
 

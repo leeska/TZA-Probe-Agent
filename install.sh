@@ -41,6 +41,7 @@ legacy_service_name="komari-agent"
 target_dir="/opt/tza-probe"
 github_proxy=""
 install_version="" # New parameter for specifying version
+nexttrace_version="v1.7.3"
 install_dir_specified=false
 service_user="${SUDO_USER:-$(id -un)}"
 user_service=false
@@ -353,6 +354,41 @@ if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
     chown "$service_user" "$target_dir"
 fi
 
+install_nexttrace() {
+    local nexttrace_arch="$arch"
+    local extension=""
+    case "$arch" in
+        arm) nexttrace_arch="armv7" ;;
+    esac
+    if [ "$os_name" = "windows" ]; then
+        extension=".exe"
+    fi
+
+    local nexttrace_name="nexttrace_${os_name}_${nexttrace_arch}${extension}"
+    local nexttrace_path="${target_dir}/nexttrace${extension}"
+    local nexttrace_url="https://github.com/nxtrace/NTrace-core/releases/download/${nexttrace_version}/${nexttrace_name}"
+    if [ -n "$github_proxy" ]; then
+        nexttrace_url="${github_proxy}/${nexttrace_url}"
+    fi
+
+    log_step "Installing NextTrace ${nexttrace_version} for carrier route probes..."
+    if ! curl -fL -o "$nexttrace_path" "$nexttrace_url"; then
+        log_warning "NextTrace download failed; the Agent will use system traceroute as a fallback."
+        rm -f "$nexttrace_path"
+        return
+    fi
+    chmod +x "$nexttrace_path"
+    if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
+        chown "$service_user" "$nexttrace_path"
+    fi
+    if [ "$os_name" = "linux" ] && [ "$EUID" -eq 0 ] && command -v setcap >/dev/null 2>&1; then
+        setcap cap_net_raw+ep "$nexttrace_path" || log_warning "Could not grant CAP_NET_RAW to NextTrace; traceroute fallback remains available."
+    fi
+    log_success "NextTrace installed to ${GREEN}$nexttrace_path${NC}"
+}
+
+install_nexttrace
+
 # Download binary
 if [ -n "$github_proxy" ]; then
     log_step "Downloading $file_name via proxy..."
@@ -556,6 +592,8 @@ ExecStart=${agent_path} ${agent_args}
 WorkingDirectory=${target_dir}
 Restart=always
 User=${service_user}
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target
