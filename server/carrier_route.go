@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,8 +21,8 @@ import (
 )
 
 const (
-	carrierRouteDefaultTimeout = 8 * time.Second
-	carrierRouteMaxTimeout     = 15 * time.Second
+	carrierRouteDefaultTimeout = 30 * time.Second
+	carrierRouteMaxTimeout     = 60 * time.Second
 	carrierRouteDefaultHops    = 24
 	carrierRouteMaxHops        = 30
 	carrierRouteMaxTargets     = 12
@@ -304,8 +305,14 @@ func executeCarrierRouteTrace(ctx context.Context, targetIP string, port int, fa
 			if cmd.ProcessState != nil {
 				trace.ExitCode = cmd.ProcessState.ExitCode()
 			}
-			lastTrace, lastErr = trace, runErr
-			if len(trace.Hops) > 0 {
+			if len(trace.Hops) > len(lastTrace.Hops) || (trace.Reached && !lastTrace.Reached) {
+				lastTrace = trace
+			}
+			lastErr = runErr
+			// A reached destination is authoritative. A partial trace is retained
+			// as a candidate, but do not return it early: the other transport may
+			// complete the path and provide the missing ASN evidence.
+			if trace.Reached && len(trace.Hops) > 0 {
 				return trace, nil
 			}
 			if ctx.Err() != nil {
@@ -315,6 +322,12 @@ func executeCarrierRouteTrace(ctx context.Context, targetIP string, port int, fa
 		if ctx.Err() != nil {
 			break
 		}
+	}
+	if len(lastTrace.Hops) > 0 {
+		// A timeout can still produce useful intermediate hops. Return them as a
+		// successful parse so the caller publishes the trace with status timeout
+		// instead of discarding the evidence behind an execution error.
+		return lastTrace, nil
 	}
 	if lastErr != nil {
 		return lastTrace, fmt.Errorf("route trace: %w", lastErr)
@@ -340,7 +353,7 @@ func lookPathCarrierRouteCommand(name string) (string, error) {
 
 func routeTraceArgs(command, probe string, port int, family string, maxHops int, targetIP string) []string {
 	if command == "nexttrace" {
-		args := []string{"--raw", "-n", "-q", "1", "--parallel-requests", "1", "--max-attempts", "1", "-m", strconv.Itoa(maxHops), "--timeout", "1000", probe, "-p", strconv.Itoa(port)}
+		args := []string{"--raw", "-n", "-q", "2", "--parallel-requests", "4", "--max-attempts", "3", "-m", strconv.Itoa(maxHops), "--timeout", "2500", probe, "-p", strconv.Itoa(port)}
 		if family == "ipv4" {
 			args = append(args, "-4")
 		} else {
@@ -348,7 +361,7 @@ func routeTraceArgs(command, probe string, port int, family string, maxHops int,
 		}
 		return append(args, targetIP)
 	}
-	args := []string{"-n", probe, "-p", strconv.Itoa(port), "-q", "1", "-w", "1", "-m", strconv.Itoa(maxHops)}
+	args := []string{"-n", probe, "-p", strconv.Itoa(port), "-q", "2", "-w", "2", "-m", strconv.Itoa(maxHops)}
 	if family == "ipv6" {
 		args = append(args, "-6")
 	}
@@ -391,6 +404,7 @@ func parseCarrierRouteTrace(output, targetIP string) carrierRouteTrace {
 func parseNexttraceRawTrace(output, targetIP string) carrierRouteTrace {
 	trace := carrierRouteTrace{}
 	target := net.ParseIP(strings.Trim(targetIP, "[]"))
+	hops := make(map[int]carrierRouteHop)
 	for _, line := range strings.Split(carrierRouteANSI.ReplaceAllString(output, ""), "\n") {
 		fields := strings.Split(strings.TrimSpace(line), "|")
 		if len(fields) < 2 || !traceHopPattern.MatchString(strings.TrimSpace(fields[0])) {
@@ -411,10 +425,29 @@ func parseNexttraceRawTrace(output, targetIP string) carrierRouteTrace {
 		if len(fields) > 4 {
 			hop.ASN = normalizeCarrierRouteASN(fields[4])
 		}
-		trace.Hops = append(trace.Hops, hop)
+		if previous, ok := hops[hopNumber]; ok {
+			if hop.IP == "" {
+				hop.IP = previous.IP
+			}
+			if hop.ASN == "" {
+				hop.ASN = previous.ASN
+			}
+			if !hop.HasRTT || (previous.HasRTT && previous.RTTMs < hop.RTTMs) {
+				hop.RTTMs, hop.HasRTT = previous.RTTMs, previous.HasRTT
+			}
+		}
+		hops[hopNumber] = hop
 		if hop.IP != "" && target != nil && net.ParseIP(hop.IP).Equal(target) {
 			trace.Reached = true
 		}
+	}
+	keys := make([]int, 0, len(hops))
+	for hop := range hops {
+		keys = append(keys, hop)
+	}
+	sort.Ints(keys)
+	for _, hop := range keys {
+		trace.Hops = append(trace.Hops, hops[hop])
 	}
 	return trace
 }

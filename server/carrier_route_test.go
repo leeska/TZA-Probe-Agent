@@ -40,9 +40,25 @@ func TestParseNexttraceRawTrace(t *testing.T) {
 	}
 }
 
+func TestParseNexttraceRawTraceCollapsesRepeatedHops(t *testing.T) {
+	output := strings.Join([]string{
+		"1|192.0.2.1|gateway|0.42|64512|LAN Address|||||0|0",
+		"2|*||||||||||",
+		"2|203.0.113.2||22.40|4837|China|Beijing|||China Unicom|0|0",
+		"3|198.51.100.8||38.50|4809|China|Beijing|||China Telecom|0|0",
+	}, "\n")
+	trace := parseNexttraceRawTrace(output, "198.51.100.8")
+	if !trace.Reached || len(trace.Hops) != 3 {
+		t.Fatalf("trace = %#v, want three unique hops and reached target", trace)
+	}
+	if trace.Hops[1].IP != "203.0.113.2" || trace.Hops[1].ASN != "4837" {
+		t.Fatalf("merged hop = %#v, want the responding duplicate to win", trace.Hops[1])
+	}
+}
+
 func TestNexttraceArgsAreBoundedAndFamilyScoped(t *testing.T) {
 	args := strings.Join(routeTraceArgs("nexttrace", "-T", 443, "ipv6", 24, "2001:db8::1"), " ")
-	for _, required := range []string{"--raw", "--parallel-requests 1", "--max-attempts 1", "--timeout 1000", "-T", "-p 443", "-6", "-m 24", "2001:db8::1"} {
+	for _, required := range []string{"--raw", "--parallel-requests 4", "--max-attempts 3", "--timeout 2500", "-T", "-p 443", "-6", "-m 24", "2001:db8::1"} {
 		if !strings.Contains(args, required) {
 			t.Fatalf("args = %q, missing %q", args, required)
 		}
