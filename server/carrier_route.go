@@ -336,19 +336,60 @@ func executeCarrierRouteTrace(ctx context.Context, targetIP string, port int, fa
 }
 
 func lookPathCarrierRouteCommand(name string) (string, error) {
-	if command, err := exec.LookPath(name); err == nil {
-		return command, nil
+	names := []string{name}
+	if name == "nexttrace" {
+		names = preferredNexttraceNames()
+	}
+	for _, candidateName := range names {
+		if command, err := exec.LookPath(candidateName); err == nil {
+			return command, nil
+		}
 	}
 	executable, err := os.Executable()
 	if err == nil {
-		for _, filename := range []string{name, name + ".exe"} {
-			candidate := filepath.Join(filepath.Dir(executable), filename)
-			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-				return candidate, nil
+		for _, candidateName := range names {
+			for _, filename := range []string{candidateName, candidateName + ".exe"} {
+				candidate := filepath.Join(filepath.Dir(executable), filename)
+				if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+					return candidate, nil
+				}
 			}
 		}
 	}
 	return "", exec.ErrNotFound
+}
+
+// preferredNexttraceNames keeps the runner name stable while allowing small
+// machines to use the tiny release. TZA_NEXTTRACE_VARIANT can force full or
+// tiny; auto selects tiny when Linux reports less than 512 MiB available.
+func preferredNexttraceNames() []string {
+	variant := strings.ToLower(strings.TrimSpace(os.Getenv("TZA_NEXTTRACE_VARIANT")))
+	if variant == "tiny" {
+		return []string{"nexttrace-tiny", "nexttrace"}
+	}
+	if variant == "full" {
+		return []string{"nexttrace", "nexttrace-tiny"}
+	}
+	if lowMemoryHost() {
+		return []string{"nexttrace-tiny", "nexttrace"}
+	}
+	return []string{"nexttrace", "nexttrace-tiny"}
+}
+
+func lowMemoryHost() bool {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "MemAvailable:" {
+			continue
+		}
+		availableKB, err := strconv.ParseInt(fields[1], 10, 64)
+		return err == nil && availableKB < 512*1024
+	}
+	return false
 }
 
 func routeTraceArgs(command, probe string, port int, family string, maxHops int, targetIP string) []string {

@@ -364,27 +364,33 @@ install_nexttrace() {
         extension=".exe"
     fi
 
-    local nexttrace_name="nexttrace_${os_name}_${nexttrace_arch}${extension}"
-    local nexttrace_path="${target_dir}/nexttrace${extension}"
-    local nexttrace_url="https://github.com/nxtrace/NTrace-core/releases/download/${nexttrace_version}/${nexttrace_name}"
-    if [ -n "$github_proxy" ]; then
-        nexttrace_url="${github_proxy}/${nexttrace_url}"
-    fi
-
     log_step "Installing NextTrace ${nexttrace_version} for carrier route probes..."
-    if ! curl -fL -o "$nexttrace_path" "$nexttrace_url"; then
+    local downloaded=false
+    for variant in nexttrace nexttrace-tiny; do
+        local nexttrace_name="${variant}_${os_name}_${nexttrace_arch}${extension}"
+        local nexttrace_path="${target_dir}/${variant}${extension}"
+        local nexttrace_url="https://github.com/nxtrace/NTrace-core/releases/download/${nexttrace_version}/${nexttrace_name}"
+        if [ -n "$github_proxy" ]; then
+            nexttrace_url="${github_proxy}/${nexttrace_url}"
+        fi
+        if curl -fL -o "$nexttrace_path" "$nexttrace_url"; then
+            downloaded=true
+            chmod +x "$nexttrace_path"
+            if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
+                chown "$service_user" "$nexttrace_path"
+            fi
+            if [ "$os_name" = "linux" ] && [ "$EUID" -eq 0 ] && command -v setcap >/dev/null 2>&1; then
+                setcap cap_net_raw+ep "$nexttrace_path" || log_warning "Could not grant CAP_NET_RAW to NextTrace; traceroute fallback remains available."
+            fi
+            log_success "${variant} installed to ${GREEN}$nexttrace_path${NC}"
+        else
+            rm -f "$nexttrace_path"
+        fi
+    done
+    if [ "$downloaded" = false ]; then
         log_warning "NextTrace download failed; the Agent will use system traceroute as a fallback."
-        rm -f "$nexttrace_path"
         return
     fi
-    chmod +x "$nexttrace_path"
-    if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
-        chown "$service_user" "$nexttrace_path"
-    fi
-    if [ "$os_name" = "linux" ] && [ "$EUID" -eq 0 ] && command -v setcap >/dev/null 2>&1; then
-        setcap cap_net_raw+ep "$nexttrace_path" || log_warning "Could not grant CAP_NET_RAW to NextTrace; traceroute fallback remains available."
-    fi
-    log_success "NextTrace installed to ${GREEN}$nexttrace_path${NC}"
 }
 
 install_nexttrace

@@ -1,11 +1,31 @@
 package server
 
 import (
+	"os"
 	"strings"
 	"testing"
 
 	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
 )
+
+func TestPreferredNexttraceNamesHonorsVariant(t *testing.T) {
+	previous := os.Getenv("TZA_NEXTTRACE_VARIANT")
+	t.Cleanup(func() { _ = os.Setenv("TZA_NEXTTRACE_VARIANT", previous) })
+	if err := os.Setenv("TZA_NEXTTRACE_VARIANT", "tiny"); err != nil {
+		t.Fatal(err)
+	}
+	names := preferredNexttraceNames()
+	if len(names) < 2 || names[0] != "nexttrace-tiny" || names[1] != "nexttrace" {
+		t.Fatalf("tiny preference = %#v", names)
+	}
+	if err := os.Setenv("TZA_NEXTTRACE_VARIANT", "full"); err != nil {
+		t.Fatal(err)
+	}
+	names = preferredNexttraceNames()
+	if len(names) < 2 || names[0] != "nexttrace" || names[1] != "nexttrace-tiny" {
+		t.Fatalf("full preference = %#v", names)
+	}
+}
 
 func TestParseCarrierRouteTrace(t *testing.T) {
 	trace := parseCarrierRouteTrace("traceroute to 202.97.14.1\n 1  192.0.2.1  0.42 ms\n 2  202.97.14.1  12.5 ms", "202.97.14.1")

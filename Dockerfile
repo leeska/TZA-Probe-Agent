@@ -11,6 +11,8 @@ ARG NEXTTRACE_VERSION=v1.7.3
 # traditional traceroute package remains as the compatibility fallback.
 RUN apk add --no-cache ca-certificates curl traceroute \
     && curl -fL "https://github.com/nxtrace/NTrace-core/releases/download/${NEXTTRACE_VERSION}/nexttrace_linux_${TARGETARCH}" -o /app/nexttrace \
+    && curl -fL "https://github.com/nxtrace/NTrace-core/releases/download/${NEXTTRACE_VERSION}/nexttrace-tiny_linux_${TARGETARCH}" -o /app/nexttrace-tiny \
+    && chmod 755 /app/nexttrace-tiny \
     && chmod 755 /app/nexttrace
 
 COPY --chmod=755 tza-probe-agent-${TARGETOS}-${TARGETARCH} /app/tza-probe-agent
